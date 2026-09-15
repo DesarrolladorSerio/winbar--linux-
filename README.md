@@ -25,8 +25,8 @@ Además, la barra se oculta sola cuando hay una ventana en pantalla completa
 
 ## Capturas
 
-*(no incluidas en el repo — corré `cargo run` y mirá la franja superior de
-tu pantalla principal)*
+*(no incluidas en el repo — ejecuta `cargo run` y revisa la franja superior
+de tu pantalla principal)*
 
 ## Por qué existe
 
@@ -78,7 +78,7 @@ Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
 
 ### Migrar desde Yasb
 
-Si venís de Yasb y querés que `winbar` lo reemplace del todo:
+Si vienes de Yasb y quieres que `winbar` lo reemplace del todo:
 
 ```powershell
 # Sacar a Yasb del autostart y cerrarlo
@@ -88,8 +88,7 @@ Stop-Process -Name yasb -Force
 
 `Alt+Space` es un hotkey global: si Yasb (o cualquier otra app) ya lo tiene
 registrado, el de `winbar` simplemente no hace nada hasta que se libere —
-andá a cerrar/desregistrar el que lo tenga tomado primero si el buscador no
-abre.
+cierra o desregistra el que lo tenga tomado primero si el buscador no abre.
 
 ## Uso
 
@@ -127,7 +126,7 @@ activo:
 Las decisiones técnicas y el detalle de cada módulo están comentados
 directamente en el código (`src/main.rs` y `src/search.rs`), que además es
 corto (~500 y ~360 líneas respectivamente) y vale la pena leer de punta a
-punta si querés tocar algo. Un resumen rápido:
+punta si quieres tocar algo. Un resumen rápido:
 
 - **`src/main.rs`**: ventana principal de la barra. Registro como AppBar
   (`SHAppBarMessage`), render con double buffering manual (GDI + bitmap
@@ -139,7 +138,7 @@ punta si querés tocar algo. Un resumen rápido:
   propio módulo. Indexado del Start Menu, filtro, y un control `EDIT`
   nativo subclaseado a mano para poder navegar la lista con las flechas.
 
-Un detalle no obvio si tocás el layout: el proceso se declara
+Un detalle no obvio si tocas el layout: el proceso se declara
 Per-Monitor-V2 DPI aware (`SetProcessDpiAwarenessContext` en `main()`) a
 propósito. Sin eso, en cualquier monitor con escalado distinto de 100%
 Windows "virtualiza" la resolución que ve el proceso y estira el contenido

@@ -56,7 +56,7 @@ lazy_static! {
 /// Recorre las carpetas del Start Menu (la de todo el sistema y la del
 /// usuario actual) buscando accesos directos (.lnk), y arma la lista de
 /// resultados ordenada alfabéticamente. Se llama de nuevo cada vez que se
-/// abre el popup, así que si instalás/desinstalás algo se refleja solo.
+/// abre el popup, así que si se instala o desinstala algo se refleja solo.
 fn index_apps() -> Vec<(String, String)> {
     let mut results = Vec::new();
     for var in ["ProgramData", "AppData"] {
