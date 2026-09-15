@@ -155,6 +155,7 @@ unsafe extern "system" fn window_proc(
             refresh_volume_state();
             search::register_hotkey(hwnd);
             SetTimer(hwnd, 1, 1000, None);
+            SetTimer(hwnd, 2, 150, None);
             LRESULT(0)
         }
         WM_HOTKEY => {
@@ -174,13 +175,16 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_TIMER => {
-            refresh_volume_state();
-            let fg = GetForegroundWindow();
-            if fg != hwnd {
-                let cmd = if is_fullscreen_window(fg) { SW_HIDE } else { SW_SHOWNOACTIVATE };
-                ShowWindow(hwnd, cmd);
+            if wparam.0 == 1 {
+                refresh_volume_state();
+                InvalidateRect(hwnd, None, false);
+            } else if wparam.0 == 2 {
+                let fg = GetForegroundWindow();
+                if fg != hwnd {
+                    let cmd = if is_fullscreen_window(fg) { SW_HIDE } else { SW_SHOWNOACTIVATE };
+                    ShowWindow(hwnd, cmd);
+                }
             }
-            InvalidateRect(hwnd, None, false);
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
