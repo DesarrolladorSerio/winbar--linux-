@@ -1,5 +1,7 @@
 #![windows_subsystem = "windows"]
 
+mod search;
+
 use std::mem;
 use std::sync::Mutex;
 use std::thread;
@@ -140,7 +142,14 @@ unsafe extern "system" fn window_proc(
             register_appbar(hwnd);
             init_com();
             refresh_volume_state();
+            search::register_hotkey(hwnd);
             SetTimer(hwnd, 1, 1000, None);
+            LRESULT(0)
+        }
+        WM_HOTKEY => {
+            if wparam.0 as i32 == search::HOTKEY_ID {
+                search::toggle_search(hwnd);
+            }
             LRESULT(0)
         }
         WM_DESTROY => {
