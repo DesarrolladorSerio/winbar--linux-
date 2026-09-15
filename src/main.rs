@@ -175,6 +175,11 @@ unsafe extern "system" fn window_proc(
         }
         WM_TIMER => {
             refresh_volume_state();
+            let fg = GetForegroundWindow();
+            if fg != hwnd {
+                let cmd = if is_fullscreen_window(fg) { SW_HIDE } else { SW_SHOWNOACTIVATE };
+                ShowWindow(hwnd, cmd);
+            }
             InvalidateRect(hwnd, None, false);
             LRESULT(0)
         }
@@ -340,12 +345,45 @@ unsafe extern "system" fn win_event_proc(
         } else {
             *FOCUSED_WINDOW_TITLE.lock().unwrap() = String::new();
         }
-        
-        let main_hwnd = *MAIN_HWND.lock().unwrap();
-        if main_hwnd != 0 {
-            InvalidateRect(HWND(main_hwnd as *mut _), None, false);
+
+        let main_hwnd_val = *MAIN_HWND.lock().unwrap();
+        if main_hwnd_val != 0 {
+            let main_hwnd = HWND(main_hwnd_val as *mut _);
+            if hwnd != main_hwnd {
+                let cmd = if is_fullscreen_window(hwnd) { SW_HIDE } else { SW_SHOWNOACTIVATE };
+                ShowWindow(main_hwnd, cmd);
+            }
+            InvalidateRect(main_hwnd, None, false);
         }
     }
+}
+
+unsafe fn is_fullscreen_window(hwnd: HWND) -> bool {
+    let mut class_buf = [0u16; 256];
+    let len = GetClassNameW(hwnd, &mut class_buf);
+    let class_name = String::from_utf16_lossy(&class_buf[..len.max(0) as usize]);
+    if class_name == "Progman" || class_name.starts_with("WorkerW") {
+        return false;
+    }
+
+    let mut wnd_rc = RECT::default();
+    if GetWindowRect(hwnd, &mut wnd_rc).is_err() {
+        return false;
+    }
+
+    let hmonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    let mut mi = MONITORINFO {
+        cbSize: mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !GetMonitorInfoW(hmonitor, &mut mi).as_bool() {
+        return false;
+    }
+
+    wnd_rc.left <= mi.rcMonitor.left
+        && wnd_rc.top <= mi.rcMonitor.top
+        && wnd_rc.right >= mi.rcMonitor.right
+        && wnd_rc.bottom >= mi.rcMonitor.bottom
 }
 
 fn komorebi_thread() {
