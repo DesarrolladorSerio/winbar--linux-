@@ -17,6 +17,7 @@ use windows::{
     Win32::Media::Audio::Endpoints::IAudioEndpointVolume,
     Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator},
     Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED},
+    Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
     Win32::UI::Shell::*,
     Win32::UI::WindowsAndMessaging::*,
     Win32::UI::Accessibility::*,
@@ -39,12 +40,22 @@ thread_local! {
 }
 
 const VOLUME_RECT_WIDTH: i32 = 100;
+const CLOCK_WIDTH: i32 = 140;
 
 fn volume_rect(width: i32, height: i32) -> RECT {
     RECT {
-        left: width - 150 - VOLUME_RECT_WIDTH - 10,
+        left: width - VOLUME_RECT_WIDTH - 20,
         top: 0,
-        right: width - 150 - 10,
+        right: width - 20,
+        bottom: height,
+    }
+}
+
+fn clock_rect(width: i32, height: i32) -> RECT {
+    RECT {
+        left: width / 2 - CLOCK_WIDTH / 2,
+        top: 0,
+        right: width / 2 + CLOCK_WIDTH / 2,
         bottom: height,
     }
 }
@@ -163,17 +174,8 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_TIMER => {
-            let mut rc = RECT::default();
-            GetClientRect(hwnd, &mut rc);
-            let width = rc.right - rc.left;
             refresh_volume_state();
-            let refresh_rc = RECT {
-                left: volume_rect(width, rc.bottom).left,
-                top: 0,
-                right: width,
-                bottom: rc.bottom,
-            };
-            InvalidateRect(hwnd, Some(&refresh_rc as *const _), false);
+            InvalidateRect(hwnd, None, false);
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
@@ -216,7 +218,7 @@ unsafe extern "system" fn window_proc(
 unsafe fn draw(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
-    
+
     let mut rc = RECT::default();
     GetClientRect(hwnd, &mut rc);
     let width = rc.right - rc.left;
@@ -229,7 +231,7 @@ unsafe fn draw(hwnd: HWND) {
     // Colors
     let bg_color = 0x001B1111; // #11111b
     let text_color = 0x00F4D6CD; // #cdd6f4
-    let mauve_color = 0x00F7A6CB; // #cba6f7
+    let mauve_color = 0x0085D256; // #56d285 — acento extraído del wallpaper activo (theming/colors.json)
 
     let bg_brush = CreateSolidBrush(COLORREF(bg_color));
     FillRect(mem_dc, &rc, bg_brush);
@@ -242,7 +244,7 @@ unsafe fn draw(hwnd: HWND) {
     let hfont = CreateFontW(
         16, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0,
         DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32, CLIP_DEFAULT_PRECIS.0 as u32,
-        CLEARTYPE_QUALITY.0 as u32, VARIABLE_PITCH.0 as u32, PCWSTR(font_name.as_ptr())
+        ANTIALIASED_QUALITY.0 as u32, VARIABLE_PITCH.0 as u32, PCWSTR(font_name.as_ptr())
     );
     let old_font = SelectObject(mem_dc, HGDIOBJ(hfont.0 as _));
 
@@ -250,7 +252,7 @@ unsafe fn draw(hwnd: HWND) {
     let active_ws = *ACTIVE_WORKSPACE.lock().unwrap();
     let mut x_offset = 10;
     let ws_labels = ["I", "II", "III", "IV", "V", "VI", "VII"];
-    let ws_width = 30;
+    let ws_width = 36;
     
     let active_bg_brush = CreateSolidBrush(COLORREF(mauve_color));
     
@@ -269,7 +271,7 @@ unsafe fn draw(hwnd: HWND) {
             SetTextColor(mem_dc, COLORREF(text_color));
         }
         
-        let mut label_w: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut label_w: Vec<u16> = label.encode_utf16().collect();
         DrawTextW(mem_dc, &mut label_w, &mut ws_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         
         x_offset += ws_width + 8;
@@ -283,10 +285,10 @@ unsafe fn draw(hwnd: HWND) {
         let mut title_rc = RECT {
             left: x_offset + 20,
             top: 0,
-            right: volume_rect(width, height).left - 10,
+            right: clock_rect(width, height).left - 10,
             bottom: height,
         };
-        let mut title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut title_w: Vec<u16> = title.encode_utf16().collect();
         DrawTextW(mem_dc, &mut title_w, &mut title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
@@ -299,20 +301,15 @@ unsafe fn draw(hwnd: HWND) {
         format!("Vol {}%", volume_pct)
     };
     let mut volume_rc = volume_rect(width, height);
-    let mut volume_w: Vec<u16> = volume_str.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut volume_w: Vec<u16> = volume_str.encode_utf16().collect();
     DrawTextW(mem_dc, &mut volume_w, &mut volume_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     // 4. Draw Clock
     let now = chrono::Local::now();
     let time_str = now.format("%H:%M:%S").to_string();
-    let mut time_w: Vec<u16> = time_str.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut clock_rc = RECT {
-        left: width - 150,
-        top: 0,
-        right: width - 20,
-        bottom: height,
-    };
-    DrawTextW(mem_dc, &mut time_w, &mut clock_rc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    let mut time_w: Vec<u16> = time_str.encode_utf16().collect();
+    let mut clock_rc = clock_rect(width, height);
+    DrawTextW(mem_dc, &mut time_w, &mut clock_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
 
@@ -403,6 +400,8 @@ fn komorebi_thread() {
 
 fn main() -> windows::core::Result<()> {
     unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
         let instance = GetModuleHandleW(None).unwrap();
         
         let class_name: Vec<u16> = "WinBarClass\0".encode_utf16().collect();

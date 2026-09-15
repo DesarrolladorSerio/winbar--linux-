@@ -316,7 +316,7 @@ unsafe fn draw_search(hwnd: HWND) {
 
     let bg_color = 0x001B1111; // #11111b
     let text_color = 0x00F4D6CD; // #cdd6f4
-    let mauve_color = 0x00F7A6CB; // #cba6f7
+    let mauve_color = 0x0085D256; // #56d285 — acento extraído del wallpaper activo (theming/colors.json)
 
     let bg_brush = CreateSolidBrush(COLORREF(bg_color));
     FillRect(mem_dc, &rc, bg_brush);
@@ -337,7 +337,7 @@ unsafe fn draw_search(hwnd: HWND) {
         DEFAULT_CHARSET.0 as u32,
         OUT_DEFAULT_PRECIS.0 as u32,
         CLIP_DEFAULT_PRECIS.0 as u32,
-        CLEARTYPE_QUALITY.0 as u32,
+        ANTIALIASED_QUALITY.0 as u32,
         VARIABLE_PITCH.0 as u32,
         PCWSTR(font_name.as_ptr()),
     );
@@ -363,7 +363,7 @@ unsafe fn draw_search(hwnd: HWND) {
         }
         if let Some((name, _)) = apps.get(app_idx) {
             row_rc.left += 8;
-            let mut name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut name_w: Vec<u16> = name.encode_utf16().collect();
             DrawTextW(
                 mem_dc,
                 &mut name_w,
