@@ -14,7 +14,7 @@ mod search;
 use std::mem;
 use std::sync::Mutex;
 use std::thread;
-use std::io::{BufRead, BufReader};
+use std::io::{BufReader, Read};
 use lazy_static::lazy_static;
 
 use std::cell::RefCell;
@@ -833,77 +833,114 @@ unsafe fn is_fullscreen_window(hwnd: HWND) -> bool {
         && wnd_rc.bottom >= mi.rcMonitor.bottom
 }
 
-/// Hilo aparte que se queda escuchando los eventos de komorebi (workspace
-/// activo, etc) por named pipe, usando el crate oficial `komorebi-client`
-/// (el mismo que usa `komorebi-bar.exe`) en vez de reimplementar su
-/// protocolo IPC a mano. Corre para siempre mientras el proceso viva,
-/// resuscribiéndose si la suscripción falla o si komorebi se reinicia
-/// (ambos casos son comunes: winbar puede arrancar antes que komorebi en el
-/// login, o komorebi puede reiniciarse manualmente más tarde).
+/// Hilo aparte que mantiene sincronizado el workspace activo con komorebi,
+/// usando el crate oficial `komorebi-client` (el mismo que usa
+/// `komorebi-bar.exe`) en vez de reimplementar su protocolo IPC a mano.
+///
+/// Ojo con cómo komorebi maneja a los suscriptores: por cada evento abre una
+/// conexión nueva a nuestro socket, y si esa conexión falla UNA sola vez (por
+/// ejemplo porque la cola de conexiones pendientes se llenó durante una
+/// ráfaga de eventos) nos borra de la lista en silencio y nunca más nos
+/// avisa nada. Lo mismo pasa si komorebi se reinicia. Desde nuestro lado no
+/// llega ningún error: el socket simplemente deja de recibir conexiones y la
+/// barra queda congelada en el último workspace. Por eso:
+///
+/// 1. El listener es no bloqueante y en cada vuelta se drenan TODAS las
+///    conexiones pendientes, procesando sólo la última (las anteriores ya
+///    quedaron viejas), para que la cola nunca se llene.
+/// 2. Cada ~1s se le pregunta directamente a komorebi el workspace en foco
+///    (una consulta chiquita, no el estado completo). Si no coincide con lo
+///    que tenemos, o komorebi volvió a responder después de estar caído, la
+///    suscripción se da por muerta y se vuelve a crear.
 fn komorebi_thread() {
-    let socket_name = "winbar_subscriber";
+    const SOCKET_NAME: &str = "winbar_subscriber";
+    const IDLE_SLEEP: std::time::Duration = std::time::Duration::from_millis(30);
+    const HEALTH_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+    let mut listener: Option<komorebi_client::UnixListener> = None;
+    let mut last_check = std::time::Instant::now() - HEALTH_CHECK_EVERY;
+
     loop {
-        let listener = match komorebi_client::subscribe(socket_name) {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("Failed to subscribe to komorebi: {}", e);
-                thread::sleep(std::time::Duration::from_secs(2));
-                continue;
+        if listener.is_none() {
+            // Soltar el listener anterior (ya se hizo arriba al poner None)
+            // antes de volver a bindear el mismo path.
+            match komorebi_client::subscribe(SOCKET_NAME) {
+                Ok(l) if l.set_nonblocking(true).is_ok() => listener = Some(l),
+                Ok(_) => {}
+                Err(e) => eprintln!("Failed to subscribe to komorebi: {}", e),
             }
-        };
+        }
 
-        komorebi_listen_loop(&listener);
-        // Si llegamos acá, komorebi cerró la conexión (reinicio, crash,
-        // etc). Esperar un toque y volver a suscribirse.
-        thread::sleep(std::time::Duration::from_secs(2));
-    }
-}
-
-/// Procesa las notificaciones de un listener ya suscrito hasta que komorebi
-/// cierra la conexión.
-fn komorebi_listen_loop(listener: &komorebi_client::UnixListener) {
-    for stream in listener.incoming() {
-        match stream {
-            Ok(s) => {
-                let reader = BufReader::new(s);
-                for line in reader.lines() {
-                    if let Ok(line) = line {
-                        // komorebi manda un JSON grande por línea con TODO su
-                        // estado; sólo nos interesa el workspace activo del
-                        // monitor que también está en foco, así que navegamos
-                        // el árbol a mano en vez de definir structs de serde
-                        // para el estado completo (que cambia entre versiones).
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                            if let Some(state) = v.get("state") {
-                                if let Some(monitors) = state.get("monitors") {
-                                    if let Some(focused_monitor_idx) = monitors.get("focused").and_then(|i| i.as_u64()) {
-                                        if let Some(elements) = monitors.get("elements").and_then(|e| e.as_array()) {
-                                            if let Some(monitor) = elements.get(focused_monitor_idx as usize) {
-                                                if let Some(workspaces) = monitor.get("workspaces") {
-                                                    if let Some(focused_ws) = workspaces.get("focused").and_then(|i| i.as_u64()) {
-                                                        let mut current = ACTIVE_WORKSPACE.lock().unwrap();
-                                                        if *current != focused_ws as usize {
-                                                            *current = focused_ws as usize;
-                                                            let hwnd = *MAIN_HWND.lock().unwrap();
-                                                            if hwnd != 0 {
-                                                                unsafe {
-                                                                    InvalidateRect(HWND(hwnd as *mut _), None, false);
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+        let mut latest: Option<String> = None;
+        if let Some(l) = &listener {
+            loop {
+                match l.accept() {
+                    Ok((stream, _)) => {
+                        // El socket aceptado hereda el modo no bloqueante del
+                        // listener; komorebi escribe todo y cierra enseguida,
+                        // así que leerlo bloqueando (con timeout) es seguro.
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                        let mut buf = String::new();
+                        if BufReader::new(stream).read_to_string(&mut buf).is_ok() {
+                            latest = Some(buf);
                         }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => {
+                        listener = None;
+                        break;
                     }
                 }
             }
-            Err(_) => continue,
         }
+        if let Some(line) = latest.as_deref().and_then(|b| b.lines().last()) {
+            if let Some(ws) = focused_workspace_from_notification(line) {
+                set_active_workspace(ws);
+            }
+        }
+
+        if last_check.elapsed() >= HEALTH_CHECK_EVERY {
+            last_check = std::time::Instant::now();
+            let query = komorebi_client::SocketMessage::Query(komorebi_client::StateQuery::FocusedWorkspaceIndex);
+            match komorebi_client::send_query(&query).ok().and_then(|r| r.trim().parse::<usize>().ok()) {
+                Some(ws) => {
+                    if ws != *ACTIVE_WORKSPACE.lock().unwrap() {
+                        // Nos perdimos un cambio: la suscripción está muerta.
+                        set_active_workspace(ws);
+                        listener = None;
+                    }
+                }
+                // komorebi no responde (no arrancó todavía o se está
+                // reiniciando): cuando vuelva no va a recordar la
+                // suscripción, así que hay que rehacerla.
+                None => listener = None,
+            }
+        }
+
+        thread::sleep(IDLE_SLEEP);
+    }
+}
+
+/// komorebi manda un JSON grande con TODO su estado; sólo nos interesa el
+/// workspace activo del monitor que también está en foco, así que navegamos
+/// el árbol a mano en vez de definir structs de serde para el estado completo
+/// (que cambia entre versiones).
+fn focused_workspace_from_notification(line: &str) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let monitors = v.get("state")?.get("monitors")?;
+    let focused_monitor_idx = monitors.get("focused")?.as_u64()? as usize;
+    let monitor = monitors.get("elements")?.as_array()?.get(focused_monitor_idx)?;
+    monitor.get("workspaces")?.get("focused")?.as_u64().map(|i| i as usize)
+}
+
+/// Actualiza el workspace activo y repinta la barra sólo si cambió.
+fn set_active_workspace(ws: usize) {
+    let mut current = ACTIVE_WORKSPACE.lock().unwrap();
+    if *current != ws {
+        *current = ws;
+        drop(current);
+        invalidate_bar();
     }
 }
 
