@@ -17,8 +17,10 @@ Solo estas 5 cosas, nada más (a propósito — ver [Fuera de alcance](#fuera-de
 4. **Volumen**: nivel + estado de mute. Click sobre el widget togglea mute,
    scroll sube/baja el volumen en pasos de 5%.
 5. **Buscador de apps**: `Alt+Space` abre un popup que indexa los accesos
-   directos del Start Menu, filtra en vivo mientras escribís, y lanza la app
-   seleccionada con Enter o click.
+   directos del Start Menu, filtra en vivo mientras se escribe, y lanza la
+   app seleccionada con Enter o click. El índice queda cacheado entre
+   aperturas (se refresca solo en segundo plano) y las apps más usadas
+   aparecen primero en la lista.
 
 Además, la barra se oculta sola cuando hay una ventana en pantalla completa
 (video, juego, etc.) y vuelve a aparecer al salir, sin taparla.
@@ -43,7 +45,9 @@ que usa `whkd`), sin ningún framework de UI de por medio.
   el propio instalador de Rust si no las detecta).
 - [komorebi](https://github.com/LGUG2Z/komorebi) corriendo, para que el
   indicador de workspaces tenga algo de qué mostrar. Sin komorebi corriendo,
-  ese indicador simplemente se queda marcando siempre "I" (no rompe nada).
+  ese indicador simplemente se queda marcando siempre "I" (no rompe nada); si
+  komorebi arranca después (o se reinicia), `winbar` reintenta la suscripción
+  cada 2s hasta conectar, así que no hace falta reiniciar `winbar` a mano.
 - Nada más — el volumen usa Core Audio (built-in de Windows), el buscador
   lee directamente las carpetas del Start Menu.
 
@@ -135,8 +139,12 @@ punta si quieres tocar algo. Un resumen rápido:
   (`SetWinEventHook`) para el título de ventana y la detección de
   fullscreen.
 - **`src/search.rs`**: el popup del buscador de apps (Alt+Space), en su
-  propio módulo. Indexado del Start Menu, filtro, y un control `EDIT`
-  nativo subclaseado a mano para poder navegar la lista con las flechas.
+  propio módulo. Indexado del Start Menu (cacheado en memoria y refrescado
+  en un thread aparte), uso persistido en
+  `%LOCALAPPDATA%\winbar\usage.json` (cuenta + última vez, con decaimiento
+  exponencial) para ordenar por frecuencia reciente, filtro, y un control
+  `EDIT` nativo subclaseado a mano para poder navegar la lista con las
+  flechas.
 
 Un detalle no obvio si tocas el layout: el proceso se declara
 Per-Monitor-V2 DPI aware (`SetProcessDpiAwarenessContext` en `main()`) a
@@ -160,6 +168,7 @@ el binario se mantenga chico y simple.
   el registro del AppBar asumen el monitor primario.
 - El color de acento del wallpaper no se aplica solo (ver
   [Theming](#theming)) — hay que editar el código y recompilar.
-- El buscador no cachea el índice entre aperturas: cada `Alt+Space` vuelve a
-  leer las carpetas del Start Menu. Es rápido (son pocas decenas de
-  archivos), pero no es instantáneo si el disco está muy ocupado.
+- El orden por uso pondera cuenta de lanzamientos y recencia (decae a la
+  mitad cada 30 días sin abrirse, y se olvida del todo pasado un año), pero
+  esos números están hardcodeados en `src/search.rs` — no hay forma de
+  ajustarlos sin recompilar.

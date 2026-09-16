@@ -8,9 +8,11 @@
 // poder interceptar flechas/Enter/Escape antes de que los use para mover el
 // cursor de texto).
 
+use std::collections::HashMap;
 use std::mem;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::thread;
 
 use lazy_static::lazy_static;
 
@@ -32,6 +34,13 @@ const POPUP_HEIGHT: i32 = 360;
 const ROW_HEIGHT: i32 = 28;
 const EDIT_HEIGHT: i32 = 32;
 const MAX_RESULTS: usize = 10;
+// Cada USAGE_HALF_LIFE_DAYS sin abrirse, el puntaje de uso de una app se
+// divide a la mitad: una app que se usó mucho hace tiempo pero ya no se abre
+// va perdiendo prioridad sola en vez de quedar clavada arriba para siempre.
+const USAGE_HALF_LIFE_DAYS: f64 = 30.0;
+// Apps que llevan más de este tiempo sin abrirse se borran del archivo de
+// uso al guardar, para que no crezca sin límite con los años.
+const USAGE_PRUNE_AFTER_DAYS: i64 = 365;
 
 lazy_static! {
     // Lista completa de apps indexadas: (nombre a mostrar, path al .lnk).
@@ -51,12 +60,38 @@ lazy_static! {
     // Brush cacheado para el fondo oscuro del EDIT (WM_CTLCOLOREDIT); se crea
     // una sola vez y se reusa, en vez de crear uno nuevo en cada repintado.
     static ref EDIT_BG_BRUSH: Mutex<isize> = Mutex::new(0);
+    // Cuántas veces se lanzó cada app y cuándo fue la última vez (clave:
+    // path al .lnk), para priorizar las más usadas *recientemente* en la
+    // lista. Se carga de disco una sola vez al primer uso y se persiste en
+    // cada lanzamiento.
+    static ref USAGE: Mutex<HashMap<String, UsageEntry>> = Mutex::new(load_usage());
+}
+
+/// Uso registrado de una app: cuántas veces se lanzó en total y el timestamp
+/// (segundos desde epoch, UTC) de la última vez. `effective_score` combina
+/// ambos con decaimiento exponencial para que el orden de la lista refleje
+/// uso reciente, no solo uso histórico.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+struct UsageEntry {
+    count: u32,
+    last_used: i64,
+}
+
+/// Puntaje de una app para ordenar la lista: la cuenta de usos decae a la
+/// mitad cada `USAGE_HALF_LIFE_DAYS` sin abrirse, así una app muy usada hace
+/// meses termina por debajo de una que se abre seguido aunque tenga menos
+/// usos acumulados.
+fn effective_score(entry: &UsageEntry, now: i64) -> f64 {
+    let age_days = (now - entry.last_used).max(0) as f64 / 86400.0;
+    entry.count as f64 * 0.5f64.powf(age_days / USAGE_HALF_LIFE_DAYS)
 }
 
 /// Recorre las carpetas del Start Menu (la de todo el sistema y la del
-/// usuario actual) buscando accesos directos (.lnk), y arma la lista de
-/// resultados ordenada alfabéticamente. Se llama de nuevo cada vez que se
-/// abre el popup, así que si se instala o desinstala algo se refleja solo.
+/// usuario actual) buscando accesos directos (.lnk). El orden de esta lista
+/// no importa: `apply_filter` reordena según frecuencia de uso y nombre cada
+/// vez que se muestra. Se llama una vez al arrancar y de nuevo en segundo
+/// plano cada vez que se abre el popup (ver `open_search`), así que si se
+/// instala o desinstala algo se refleja solo sin bloquear la apertura.
 fn index_apps() -> Vec<(String, String)> {
     let mut results = Vec::new();
     for var in ["ProgramData", "AppData"] {
@@ -65,10 +100,46 @@ fn index_apps() -> Vec<(String, String)> {
             walk_dir(&dir, &mut results);
         }
     }
-    results.sort_by(|a: &(String, String), b: &(String, String)| {
-        a.0.to_lowercase().cmp(&b.0.to_lowercase())
-    });
     results
+}
+
+/// Path al archivo donde se persisten los contadores de uso de cada app
+/// (cuántas veces se lanzó cada .lnk), para poder mostrar las más usadas
+/// primero. Vive en `%LOCALAPPDATA%\winbar\usage.json`.
+fn usage_file_path() -> Option<PathBuf> {
+    std::env::var("LOCALAPPDATA")
+        .ok()
+        .map(|base| Path::new(&base).join("winbar").join("usage.json"))
+}
+
+/// Carga los contadores de uso guardados en disco. Si el archivo no existe
+/// todavía o está corrupto, arranca de cero sin fallar.
+fn load_usage() -> HashMap<String, UsageEntry> {
+    usage_file_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_default()
+}
+
+/// Borra del mapa las apps que llevan más de USAGE_PRUNE_AFTER_DAYS sin
+/// abrirse, para que el archivo de uso no crezca sin límite con los años.
+fn prune_stale_usage(usage: &mut HashMap<String, UsageEntry>, now: i64) {
+    usage.retain(|_, entry| (now - entry.last_used) / 86400 < USAGE_PRUNE_AFTER_DAYS);
+}
+
+/// Persiste los contadores de uso a disco (creando la carpeta si hace
+/// falta). Se llama en cada lanzamiento; el archivo es chico así que el
+/// costo es despreciable.
+fn save_usage(usage: &HashMap<String, UsageEntry>) {
+    let Some(path) = usage_file_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string(usage) {
+        let _ = std::fs::write(path, json);
+    }
 }
 
 /// Recorrida recursiva de directorios buscando archivos .lnk. Guarda el
@@ -96,35 +167,58 @@ fn walk_dir(dir: &Path, out: &mut Vec<(String, String)>) {
 }
 
 /// Recalcula FILTERED según `query` (substring case-insensitive sobre el
-/// nombre de cada app) y resetea la selección a la primera fila. Con el
-/// campo vacío muestra las primeras MAX_RESULTS apps sin filtrar.
+/// nombre de cada app), ordenando los resultados por puntaje de uso
+/// reciente (ver `effective_score`) y alfabéticamente como desempate. Con el
+/// campo vacío este orden es lo único que decide qué se ve, así que las
+/// apps abiertas seguido últimamente aparecen arriba de entrada. Resetea la
+/// selección a la primera fila.
 fn apply_filter(query: &str) {
     let apps = APPS.lock().unwrap();
+    let usage = USAGE.lock().unwrap();
+    let now = chrono::Utc::now().timestamp();
     let query_lower = query.to_lowercase();
+
+    let mut candidates: Vec<usize> = (0..apps.len())
+        .filter(|&i| query_lower.is_empty() || apps[i].0.to_lowercase().contains(&query_lower))
+        .collect();
+    candidates.sort_by(|&a, &b| {
+        let score_a = usage.get(&apps[a].1).map_or(0.0, |e| effective_score(e, now));
+        let score_b = usage.get(&apps[b].1).map_or(0.0, |e| effective_score(e, now));
+        score_b
+            .partial_cmp(&score_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| apps[a].0.to_lowercase().cmp(&apps[b].0.to_lowercase()))
+    });
+
     let mut filtered = FILTERED.lock().unwrap();
     filtered.clear();
-    if query_lower.is_empty() {
-        filtered.extend(0..apps.len().min(MAX_RESULTS));
-    } else {
-        filtered.extend(
-            apps.iter()
-                .enumerate()
-                .filter(|(_, (name, _))| name.to_lowercase().contains(&query_lower))
-                .map(|(i, _)| i)
-                .take(MAX_RESULTS),
-        );
-    }
+    filtered.extend(candidates.into_iter().take(MAX_RESULTS));
     *SELECTED.lock().unwrap() = 0;
 }
 
 /// Lanza la app actualmente seleccionada (Enter o click) vía ShellExecuteW
 /// sobre su .lnk, como si se le hubiera hecho doble click desde el Explorador.
+/// De paso suma un uso y actualiza la fecha de esa app, poda del historial
+/// las que quedaron sin abrirse hace mucho, y persiste todo, para que las
+/// próximas veces la lista priorice uso reciente.
 fn launch_selected() {
     let idx = *SELECTED.lock().unwrap();
     let filtered = FILTERED.lock().unwrap();
     let apps = APPS.lock().unwrap();
     if let Some(&app_idx) = filtered.get(idx) {
         if let Some((_, path)) = apps.get(app_idx) {
+            let mut usage = USAGE.lock().unwrap();
+            let now = chrono::Utc::now().timestamp();
+            let entry = usage.entry(path.clone()).or_insert(UsageEntry {
+                count: 0,
+                last_used: now,
+            });
+            entry.count += 1;
+            entry.last_used = now;
+            prune_stale_usage(&mut usage, now);
+            save_usage(&usage);
+            drop(usage);
+
             // Acá sí hace falta el '\0' final: ShellExecuteW espera un
             // PCWSTR (string null-terminated de estilo C), no un slice con
             // longitud explícita como DrawTextW.
@@ -158,12 +252,30 @@ pub fn toggle_search(main_hwnd: HWND) {
     }
 }
 
-/// Crea (o recrea) la ventana del popup, centrada en la pantalla, e indexa
-/// las apps de nuevo. El popup se destruye por completo al cerrarse (no se
-/// oculta y reusa), así que cada apertura vuelve a pasar por acá.
+/// Indexa las apps por adelantado, antes de que se abra el popup por primera
+/// vez. Se llama una vez al arrancar la barra (ver `main.rs`) para que el
+/// primer `Alt+Space` de la sesión ya encuentre el índice cacheado en vez de
+/// tener que leer el Start Menu con el popup ya visible.
+pub fn warm_index() {
+    thread::spawn(|| {
+        *APPS.lock().unwrap() = index_apps();
+    });
+}
+
+/// Crea (o recrea) la ventana del popup, centrada en la pantalla. El índice
+/// de apps se sirve cacheado (instantáneo) y se refresca en un thread aparte
+/// para que instalar/desinstalar algo se siga reflejando solo sin bloquear
+/// la apertura con la lectura de disco. El popup se destruye por completo al
+/// cerrarse (no se oculta y reusa), así que cada apertura vuelve a pasar por
+/// acá.
 unsafe fn open_search(_main_hwnd: HWND) {
-    *APPS.lock().unwrap() = index_apps();
+    if APPS.lock().unwrap().is_empty() {
+        *APPS.lock().unwrap() = index_apps();
+    }
     apply_filter("");
+    thread::spawn(|| {
+        *APPS.lock().unwrap() = index_apps();
+    });
 
     let instance = GetModuleHandleW(None).unwrap();
 

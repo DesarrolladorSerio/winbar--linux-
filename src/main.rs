@@ -192,6 +192,7 @@ unsafe extern "system" fn window_proc(
             init_com();
             refresh_volume_state();
             search::register_hotkey(hwnd);
+            search::warm_index(); // precarga el índice de apps para que el primer Alt+Space ya lo encuentre cacheado
             SetTimer(hwnd, 1, 1000, None); // timer 1: refresca volumen + reloj cada 1s
             SetTimer(hwnd, 2, 150, None);  // timer 2: chequeo de fullscreen, rápido para que
                                             // ocultar/mostrar la barra se sienta instantáneo
@@ -478,17 +479,32 @@ unsafe fn is_fullscreen_window(hwnd: HWND) -> bool {
 /// Hilo aparte que se queda escuchando los eventos de komorebi (workspace
 /// activo, etc) por named pipe, usando el crate oficial `komorebi-client`
 /// (el mismo que usa `komorebi-bar.exe`) en vez de reimplementar su
-/// protocolo IPC a mano. Corre para siempre mientras el proceso viva.
+/// protocolo IPC a mano. Corre para siempre mientras el proceso viva,
+/// resuscribiéndose si la suscripción falla o si komorebi se reinicia
+/// (ambos casos son comunes: winbar puede arrancar antes que komorebi en el
+/// login, o komorebi puede reiniciarse manualmente más tarde).
 fn komorebi_thread() {
     let socket_name = "winbar_subscriber";
-    let listener = match komorebi_client::subscribe(socket_name) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("Failed to subscribe to komorebi: {}", e);
-            return;
-        }
-    };
+    loop {
+        let listener = match komorebi_client::subscribe(socket_name) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Failed to subscribe to komorebi: {}", e);
+                thread::sleep(std::time::Duration::from_secs(2));
+                continue;
+            }
+        };
 
+        komorebi_listen_loop(&listener);
+        // Si llegamos acá, komorebi cerró la conexión (reinicio, crash,
+        // etc). Esperar un toque y volver a suscribirse.
+        thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+/// Procesa las notificaciones de un listener ya suscrito hasta que komorebi
+/// cierra la conexión.
+fn komorebi_listen_loop(listener: &komorebi_client::UnixListener) {
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
