@@ -18,6 +18,9 @@ windows = { version = "0.58", features = [
     "Win32_System_Com",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_HiDpi",
+    "Win32_Devices_Display",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
 ] }
 lazy_static = "1.5.0"
 chrono = "0.4"

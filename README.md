@@ -8,15 +8,26 @@ una ventana registrada como Windows AppBar.
 
 ## Qué hace
 
-Solo estas 5 cosas, nada más (a propósito — ver [Fuera de alcance](#fuera-de-alcance)):
+Solo estas cosas, nada más (a propósito — ver [Fuera de alcance](#fuera-de-alcance)):
 
 1. **Indicador de workspace activo** (I–VII), sincronizado en vivo con
    [komorebi](https://github.com/LGUG2Z/komorebi) vía su crate oficial.
 2. **Nombre de la ventana en foco**, actualizado en tiempo real.
-3. **Reloj**, centrado en la barra.
-4. **Volumen**: nivel + estado de mute. Click sobre el widget togglea mute,
-   scroll sube/baja el volumen en pasos de 5%.
-5. **Buscador de apps**: `Alt+Space` abre un popup que indexa los accesos
+3. **Volumen**: nivel + estado de mute, con una barrita fina de nivel debajo
+   del texto. Click izquierdo fija el volumen según dónde se clickea dentro
+   del widget (como un mini slider), click derecho mutea/desmutea, y scroll
+   sube/baja en pasos de 5%.
+4. **Brillo** del monitor primario vía DDC/CI, con la misma barrita de nivel
+   y el mismo click-para-fijar que el volumen. Si el monitor no expone DDC/CI
+   (paneles internos de notebook, algunos monitores por USB-C) muestra
+   "Brillo N/D" en vez de romper nada.
+5. **Velocidad de red**: bajada y subida en vivo (↓/↑, en K o M por segundo)
+   de la interfaz que Windows usa para salir a Internet ahora mismo, o "Sin
+   red" resaltado en rojo si no hay ninguna.
+6. **Bloq Mayús / Bloq Num**: cada uno resaltado con el color de acento
+   cuando está activo.
+7. **Reloj**, centrado en la barra.
+8. **Buscador de apps**: `Alt+Space` abre un popup que indexa los accesos
    directos del Start Menu, filtra en vivo mientras se escribe, y lanza la
    app seleccionada con Enter o click. El índice queda cacheado entre
    aperturas (se refresca solo en segundo plano) y las apps más usadas
@@ -103,7 +114,8 @@ cierra o desregistra el que lo tenga tomado primero si el buscador no abre.
 | `↑` / `↓` en el buscador | Mueve la selección |
 | `Enter` / click en una fila | Lanza la app seleccionada y cierra el popup |
 | `Esc` / click afuera del popup | Cierra el buscador sin lanzar nada |
-| Click sobre el widget de volumen | Mutea/desmutea |
+| Click izquierdo en volumen o brillo | Fija el nivel según dónde se clickea dentro del widget |
+| Click derecho sobre el widget de volumen | Mutea/desmutea |
 | Scroll sobre el widget de volumen | Sube/baja el volumen 5% por paso |
 
 ## Theming
@@ -135,7 +147,10 @@ punta si quieres tocar algo. Un resumen rápido:
 - **`src/main.rs`**: ventana principal de la barra. Registro como AppBar
   (`SHAppBarMessage`), render con double buffering manual (GDI + bitmap
   intermedio), integración con komorebi por named pipe en un thread aparte,
-  Core Audio vía COM para el volumen, hook global de foreground
+  Core Audio vía COM para el volumen, brillo del monitor primario vía
+  DDC/CI (Dxva2) en su propio thread con un canal para no bloquear la UI
+  mientras espera al monitor, velocidad de red vía `GetBestInterface` +
+  `GetIfEntry2` (delta de bytes entre refrescos), hook global de foreground
   (`SetWinEventHook`) para el título de ventana y la detección de
   fullscreen.
 - **`src/search.rs`**: el popup del buscador de apps (Alt+Space), en su
@@ -158,16 +173,20 @@ desalineado de nuevo, esa declaración es lo primero para revisar.
 ## Fuera de alcance (a propósito)
 
 CPU/memoria, notificaciones, media player, power menu, clima, calendario,
-systray, popups con blur/animaciones, theming vía archivo de config (por
+systray, taskbar/window switcher, batería, papelera de reciclaje, chequeo
+de updates, popups con blur/animaciones, theming vía archivo de config (por
 ahora). La idea es cubrir justo lo que se usa a diario y nada más, para que
 el binario se mantenga chico y simple.
 
 ## Limitaciones conocidas
 
-- Pensado y probado para **un solo monitor**. La detección de fullscreen y
-  el registro del AppBar asumen el monitor primario.
+- Pensado y probado para **un solo monitor**. La detección de fullscreen, el
+  registro del AppBar y el brillo (DDC/CI) asumen el monitor primario.
 - El color de acento del wallpaper no se aplica solo (ver
   [Theming](#theming)) — hay que editar el código y recompilar.
+- El brillo depende de que el monitor exponga DDC/CI: paneles internos de
+  notebook y algunos monitores por USB-C/DisplayLink no lo soportan, y en
+  esos casos el widget muestra "Brillo N/D" sin poder hacer nada al respecto.
 - El orden por uso pondera cuenta de lanzamientos y recencia (decae a la
   mitad cada 30 días sin abrirse, y se olvida del todo pasado un año), pero
   esos números están hardcodeados en `src/search.rs` — no hay forma de
